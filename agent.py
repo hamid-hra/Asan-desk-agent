@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import socket
+import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -20,8 +21,9 @@ import psutil
 import requests
 
 import hbbs
+import sniff
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 URL = os.environ.get("AGENT_URL", "http://localhost:8000/api/agent/ingest")
 TOKEN = os.environ.get("AGENT_TOKEN", "")
@@ -40,9 +42,15 @@ HBBS_DIR = os.environ.get("AGENT_HBBS_DIR", "")
 # مسیر id_ed25519.pub سرور شناسه (اختیاری): sha256 آن گزارش می‌شود تا پنل بتواند یکسان بودن کلید سرورهای HA را بسنجد
 KEY_FILE = os.environ.get("AGENT_KEY_FILE") or (os.path.join(HBBS_DIR, "id_ed25519.pub") if HBBS_DIR else "")
 # پروسه‌هایی که وضعیتشان گزارش می‌شود؛ روی سرور راست‌دسک پیش‌فرض hbbs,hbbr و در غیر این صورت هیچ
-SERVICES = [n.strip() for n in os.environ.get("AGENT_SERVICES", "hbbs,hbbr" if HBBS_DIR else "").split(",") if n.strip()]
+SERVICES = [n.strip() for n in (os.environ.get("AGENT_SERVICES") or ("hbbs,hbbr" if HBBS_DIR else "")).split(",") if n.strip()]
 PEERS_INTERVAL = float(os.environ.get("AGENT_PEERS_INTERVAL", "600"))
 PEERS_URL = os.environ.get("AGENT_PEERS_URL") or (URL[: -len("/ingest")] + "/peers" if URL.endswith("/ingest") else "")
+# شنود اختیاری ثبت‌نام‌های UDP برای وضعیت آنلاین دستگاه‌های قدیمی (sniff.py)؛ نیاز به network_mode: host و cap NET_RAW
+SNIFF = os.environ.get("AGENT_SNIFF", "").strip().lower() in ("1", "true", "yes", "on")
+SNIFF_PORT = int(os.environ.get("AGENT_SNIFF_PORT") or "21116")
+ONLINE_WINDOW = float(os.environ.get("AGENT_ONLINE_WINDOW") or "45")
+ONLINE_URL = os.environ.get("AGENT_ONLINE_URL") or (URL[: -len("/ingest")] + "/online" if URL.endswith("/ingest") else "")
+ONLINE_BATCH = 2000
 # اندازه‌گیری تأخیر: زمان اتصال TCP به این مقصد (پیش‌فرض: خود داشبورد)
 PING_TARGET = os.environ.get("AGENT_PING_TARGET", "")
 
@@ -216,6 +224,40 @@ def load_token() -> str:
         time.sleep(5)
 
 
+def make_sniffer():
+    if not SNIFF:
+        return None
+    if not ONLINE_URL:
+        log.warning("AGENT_ONLINE_URL is not set and AGENT_URL does not end in /ingest — online devices will not be reported")
+        return None
+    sniffer = sniff.Sniffer(SNIFF_PORT, ONLINE_WINDOW)
+    return sniffer if sniffer.start() else None
+
+
+def report_online(session, sniffer) -> None:
+    """شناسه‌های دستگاه‌هایی که الان آنلاین‌اند (در دسته‌های ۲۰۰۰تایی). بدون هیچ شناسه هم یک گزارش می‌رود تا پنل بداند شنود زنده است."""
+    ids = sniffer.online()
+    chunks = [ids[i:i + ONLINE_BATCH] for i in range(0, len(ids), ONLINE_BATCH)] or [[]]
+    for chunk in chunks:
+        r = session.post(ONLINE_URL, json={"ids": chunk}, timeout=15)
+        r.raise_for_status()
+
+
+def start_peers_worker(peers_sync) -> None:
+    """همگام‌سازی دستگاه‌های hbbs در رشتهٔ جدا: اولین بار ده‌ها هزار ردیف می‌فرستد و نباید گزارش منابع را متوقف کند
+    (وگرنه پنل سرور را «بدون گزارش» می‌بیند)."""
+
+    def run():
+        while True:
+            try:
+                peers_sync.maybe_sync()
+            except Exception as exc:  # دیتابیس هنگام کپی در حال نوشتن بود یا پنل در دسترس نیست؛ دور بعد
+                log.warning("peers sync failed: %s", exc)
+            time.sleep(30)
+
+    threading.Thread(target=run, name="peers-sync", daemon=True).start()
+
+
 def make_peers_sync(session):
     if not HBBS_DIR:
         return None
@@ -226,7 +268,10 @@ def make_peers_sync(session):
         log.warning("AGENT_PEERS_URL is not set and AGENT_URL does not end in /ingest — registered devices will not be reported")
         return None
     log.info("reporting hbbs devices from %s → %s every %ss", HBBS_DIR, PEERS_URL, PEERS_INTERVAL)
-    return hbbs.PeersSync(HBBS_DIR, PEERS_URL, session, interval=PEERS_INTERVAL)
+    # رشتهٔ جدا، نشست جدا (requests.Session بین رشته‌ها مشترک نمی‌شود)
+    worker = requests.Session()
+    worker.headers.update(session.headers)
+    return hbbs.PeersSync(HBBS_DIR, PEERS_URL, worker, interval=PEERS_INTERVAL)
 
 
 def main():
@@ -238,6 +283,9 @@ def main():
     session = requests.Session()
     session.headers["Authorization"] = f"Bearer {token}"
     peers_sync = make_peers_sync(session)
+    if peers_sync:
+        start_peers_worker(peers_sync)
+    sniffer = make_sniffer()
     backoff = INTERVAL
     time.sleep(1)
     while True:
@@ -253,11 +301,11 @@ def main():
         except Exception as exc:  # شبکه یا داشبورد در دسترس نیست — دوباره تلاش می‌کنیم
             log.warning("report failed: %s", exc)
             backoff = min(backoff * 2, 300)
-        if peers_sync:
+        if sniffer:
             try:
-                peers_sync.maybe_sync()
-            except Exception as exc:  # دیتابیس هنگام کپی در حال نوشتن بود یا پنل در دسترس نیست؛ دور بعد
-                log.warning("peers sync failed: %s", exc)
+                report_online(session, sniffer)
+            except Exception as exc:  # پنل در دسترس نیست؛ دور بعد
+                log.warning("online report failed: %s", exc)
         time.sleep(max(1.0, backoff - (time.monotonic() - started)))
 
 

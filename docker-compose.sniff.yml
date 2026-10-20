@@ -1,0 +1,13 @@
+# افزونهٔ اختیاری: شنود ثبت‌نام‌های UDP برای دانستن «کدام دستگاه‌های قدیمی الان آنلاین‌اند».
+# فقط کانتینر ایجنت دسترسی گرفتن بسته از کارت شبکهٔ میزبان را پیدا می‌کند (network_mode host + NET_RAW)؛
+# hbbs و hbbr و کانتینرهای دیگر هیچ تغییری نمی‌کنند. اجرا:
+#   echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.sniff.yml' >> .env && docker compose up -d --build
+# (با COMPOSE_FILE در .env، به‌روزرسانی ایجنت از داخل پنل هم همین حالت را نگه می‌دارد)
+# برگشت به حالت عادی: آن خط را از .env پاک کنید و دوباره docker compose up -d --build بزنید.
+services:
+  agent:
+    network_mode: host
+    cap_add:
+      - NET_RAW
+    environment:
+      AGENT_SNIFF: "1"

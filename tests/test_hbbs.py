@@ -115,27 +115,40 @@ class FakeSession:
         return FakeResponse({"created": len(json["peers"]), "updated": 0, "skipped": 0})
 
 
-def test_sync_sends_in_batches_and_only_when_changed(tmp_path, monkeypatch):
+def test_sync_sends_in_batches_and_then_only_what_changed(tmp_path, monkeypatch):
     monkeypatch.setattr(hbbs, "BATCH", 2)
     make_db(tmp_path, ROWS).close()
     session = FakeSession()
     sync = hbbs.PeersSync(tmp_path, "https://panel/api/agent/peers", session, interval=0)
 
     result = sync.maybe_sync()
-    assert result == {"peers": 3, "created": 3, "updated": 0, "skipped": 0}
+    assert result == {"peers": 3, "sent": 3, "created": 3, "updated": 0, "skipped": 0}
     assert [len(body["peers"]) for _, body in session.posts] == [2, 1]
     assert all(url == "https://panel/api/agent/peers" for url, _ in session.posts)
 
     assert sync.maybe_sync() is None  # فایل عوض نشده
     assert len(session.posts) == 2
 
+    # یک ردیف تازه و یک ردیف تغییرکرده → فقط همان دو فرستاده می‌شود
     conn = sqlite3.connect(tmp_path / hbbs.DB_NAME)
     conn.execute("insert into peer (guid, id, uuid, pk, info) values (?, ?, ?, ?, ?)",
                  (b"z" * 16, "555666777", b"u", b"pk", '{"ip":"8.8.8.8"}'))
+    conn.execute("update peer set info = ? where id = ?", ('{"ip":"9.9.9.9"}', "482913557"))
     conn.commit()
     conn.close()
     os.utime(tmp_path / hbbs.DB_NAME, ns=(1, 2**40))  # mtime مطمئناً فرق کند
-    assert sync.maybe_sync()["peers"] == 4
+    result = sync.maybe_sync()
+    assert result["peers"] == 4 and result["sent"] == 2
+    sent_ids = {p["id"] for p in session.posts[-1][1]["peers"]}
+    assert sent_ids == {"555666777", "482913557"}
+
+
+def test_full_resend_happens_every_full_every_seconds(tmp_path):
+    make_db(tmp_path, ROWS).close()
+    session = FakeSession()
+    sync = hbbs.PeersSync(tmp_path, "u", session, interval=0, full_every=0)
+    assert sync.maybe_sync()["sent"] == 3
+    assert sync.maybe_sync()["sent"] == 3  # full_every=0: هر بار کامل
 
 
 def test_sync_respects_interval(tmp_path):
@@ -157,7 +170,7 @@ def test_failed_post_is_retried_later(tmp_path):
     with pytest.raises(RuntimeError):
         sync.maybe_sync()
     sync.session = FakeSession()
-    assert sync.maybe_sync()["peers"] == 3  # چون ارسال موفق نبود، اثرانگشت ذخیره نشده است
+    assert sync.maybe_sync()["sent"] == 3  # چون ارسال موفق نبود، چیزی «فرستاده‌شده» ثبت نشده است
 
 
 # ---------- سرویس‌ها ----------

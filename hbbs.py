@@ -144,15 +144,21 @@ def fingerprint(directory) -> tuple:
     return tuple(out)
 
 
+def signature(peer: dict) -> int:
+    return hash((peer["id"], peer["uuid_hash"], peer["ip"], peer["created_at"]))
+
+
 class PeersSync:
-    """هر `interval` ثانیه دیتابیس hbbs را می‌سنجد و اگر عوض شده بود (یا هر `full_every` ثانیه) کل فهرست را می‌فرستد."""
+    """هر `interval` ثانیه دیتابیس hbbs را می‌سنجد. بار اول (و هر `full_every` ثانیه) کل فهرست را می‌فرستد؛ در بقیه
+    فقط ردیف‌های تازه یا تغییرکرده، تا ده‌ها هزار دستگاه هر چند دقیقه دوباره فرستاده نشوند."""
 
     def __init__(self, directory, url: str, session, interval: float = 600, full_every: float = 6 * 3600):
         self.directory, self.url, self.session = directory, url, session
         self.interval, self.full_every = interval, full_every
         self._checked = None
-        self._sent = None
+        self._full_at = None
         self._fp = None
+        self._sigs: dict[str, int] = {}
 
     def maybe_sync(self):
         now = time.monotonic()
@@ -160,16 +166,25 @@ class PeersSync:
             return None
         self._checked = now
         fp = fingerprint(self.directory)
-        if fp == self._fp and self._sent is not None and now - self._sent < self.full_every:
+        full = self._full_at is None or now - self._full_at >= self.full_every
+        if fp == self._fp and not full:
             return None
         peers = read_peers(self.directory)
+        if full:
+            self._sigs = {}
+        todo = [p for p in peers if self._sigs.get(p["id"]) != signature(p)]
         totals = {"created": 0, "updated": 0, "skipped": 0}
-        for i in range(0, len(peers), BATCH):
-            r = self.session.post(self.url, json={"peers": peers[i:i + BATCH]}, timeout=30)
+        for i in range(0, len(todo), BATCH):
+            batch = todo[i:i + BATCH]
+            r = self.session.post(self.url, json={"peers": batch}, timeout=30)
             r.raise_for_status()
             for key, value in r.json().items():
                 if key in totals:
                     totals[key] += int(value)
-        self._fp, self._sent = fp, now
-        log.info("peers sync: %d peers read, %s", len(peers), totals)
-        return {"peers": len(peers), **totals}
+            # دسته‌ای که پنل پذیرفت دوباره فرستاده نمی‌شود، حتی اگر دستهٔ بعدی خطا بدهد
+            self._sigs.update({p["id"]: signature(p) for p in batch})
+        if full:
+            self._full_at = now
+        self._fp = fp
+        log.info("peers sync: %d peers read, %d sent, %s", len(peers), len(todo), totals)
+        return {"peers": len(peers), "sent": len(todo), **totals}

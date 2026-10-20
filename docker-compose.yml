@@ -1,0 +1,36 @@
+# نصب ایجنت با docker compose (روش پیشنهادی؛ با همین فایل، ایجنت از داخل پنل
+# «تنظیمات ← به‌روزرسانی پنل» هم قابل به‌روزرسانی است، چون برچسب asandesk.agent دارد).
+#
+#   git clone https://github.com/hamid-hra/Asan-desk-agent.git && cd Asan-desk-agent
+#   cp .env.example .env     # AGENT_URL، AGENT_TOKEN و HBBS_DATA را پر کنید
+#   docker compose up -d --build
+#
+# حالت شنود اختیاری آنلاین بودن دستگاه‌های قدیمی: docker-compose.sniff.yml (README).
+name: asandesk-agent
+
+services:
+  agent:
+    build: .
+    image: asandesk-agent
+    container_name: asandesk-agent
+    restart: unless-stopped
+    pid: host
+    labels:
+      asandesk.agent: "true"
+    environment:
+      AGENT_URL: ${AGENT_URL:?AGENT_URL را در .env بگذارید}
+      AGENT_TOKEN: ${AGENT_TOKEN:?AGENT_TOKEN را در .env بگذارید}
+      AGENT_DISK_PATH: /hostfs
+      AGENT_SYS: /hostsys
+      # فقط وقتی HBBS_DATA هست: وضعیت hbbs/hbbr و دستگاه‌های ثبت‌شده هم گزارش می‌شود
+      AGENT_HBBS_DIR: ${HBBS_DATA:+/hbbs}
+      AGENT_PORTS: ${AGENT_PORTS:-}
+      AGENT_NET_CAPACITY_MBPS: ${AGENT_NET_CAPACITY_MBPS:-}
+      AGENT_IP: ${AGENT_IP:-}
+      AGENT_SERVICES: ${AGENT_SERVICES:-}
+      AGENT_PING_TARGET: ${AGENT_PING_TARGET:-}
+    volumes:
+      - /:/hostfs:ro
+      - /sys:/hostsys:ro
+      # پوشهٔ دادهٔ hbbs فقط‌خواندنی؛ بدون HBBS_DATA چیزی از آن خوانده نمی‌شود
+      - ${HBBS_DATA:-/tmp}:/hbbs:ro
