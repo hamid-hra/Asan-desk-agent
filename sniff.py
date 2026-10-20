@@ -24,6 +24,7 @@ ETH_P_IP = 0x0800
 ETH_P_IPV6 = 0x86DD
 ETH_P_8021Q = 0x8100
 SO_ATTACH_FILTER = 26  # linux/socket.h
+MAX_SEEN = 500_000  # سقف حافظه حتی اگر کسی سیلی از شناسه‌های جعلی بفرستد
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,32}$")
 
 # RendezvousMessage: register_peer = 6 ، register_pk = 15 (هر دو فیلد اولشان شناسه است)
@@ -191,7 +192,8 @@ class Sniffer:
                 if peer_id:
                     self.packets += 1
                     with self._lock:
-                        self._seen[peer_id] = time.monotonic()
+                        if peer_id in self._seen or len(self._seen) < MAX_SEEN:
+                            self._seen[peer_id] = time.monotonic()
 
     def online(self) -> list[str]:
         """شناسه‌هایی که در `window` ثانیهٔ اخیر ثبت‌نام کرده‌اند؛ ردیف‌های کهنه پاک می‌شوند."""

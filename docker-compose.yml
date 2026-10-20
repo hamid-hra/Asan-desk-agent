@@ -17,6 +17,16 @@ services:
     pid: host
     labels:
       asandesk.agent: "true"
+    # ایجنت هیچ‌وقت نباید منابع hbbs/hbbr را بگیرد: سقف CPU و حافظه، و اولین قربانی در کمبود حافظه
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    oom_score_adj: 900
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       AGENT_URL: ${AGENT_URL:?AGENT_URL را در .env بگذارید}
       AGENT_TOKEN: ${AGENT_TOKEN:?AGENT_TOKEN را در .env بگذارید}
@@ -29,6 +39,9 @@ services:
       AGENT_IP: ${AGENT_IP:-}
       AGENT_SERVICES: ${AGENT_SERVICES:-}
       AGENT_PING_TARGET: ${AGENT_PING_TARGET:-}
+      AGENT_INTERVAL: ${AGENT_INTERVAL:-}
+      AGENT_LOGS: ${AGENT_LOGS:-}
+      AGENT_DOCKER_ROOT: ${AGENT_DOCKER_ROOT:-}
     volumes:
       - /:/hostfs:ro
       - /sys:/hostsys:ro

@@ -4,5 +4,5 @@ WORKDIR /app
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --retries 10 --timeout 60 -r requirements.txt
-COPY agent.py hbbs.py sniff.py ./
+COPY agent.py hbbs.py logs.py sniff.py ./
 CMD ["python", "agent.py"]

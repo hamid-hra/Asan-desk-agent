@@ -21,15 +21,16 @@ import psutil
 import requests
 
 import hbbs
+import logs
 import sniff
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 URL = os.environ.get("AGENT_URL", "http://localhost:8000/api/agent/ingest")
 TOKEN = os.environ.get("AGENT_TOKEN", "")
 # در docker compose، backend توکن را می‌سازد و از طریق volume مشترک در این فایل قرار می‌دهد
 TOKEN_FILE = os.environ.get("AGENT_TOKEN_FILE", "")
-INTERVAL = float(os.environ.get("AGENT_INTERVAL", "15"))
+INTERVAL = float(os.environ.get("AGENT_INTERVAL") or "15")
 PROC = os.environ.get("AGENT_PROC", "/proc")
 SYS = os.environ.get("AGENT_SYS", "/sys")
 DISK_PATH = os.environ.get("AGENT_DISK_PATH", "/hostfs" if os.path.isdir("/hostfs") else "/")
@@ -51,6 +52,10 @@ SNIFF_PORT = int(os.environ.get("AGENT_SNIFF_PORT") or "21116")
 ONLINE_WINDOW = float(os.environ.get("AGENT_ONLINE_WINDOW") or "45")
 ONLINE_URL = os.environ.get("AGENT_ONLINE_URL") or (URL[: -len("/ingest")] + "/online" if URL.endswith("/ingest") else "")
 ONLINE_BATCH = 2000
+# لاگ کانتینرهای همان سرویس‌ها برای «لاگ داکر» پنل (logs.py)؛ فقط فایل json-file داکر از /hostfs خوانده می‌شود
+LOGS = (os.environ.get("AGENT_LOGS") or "1").strip().lower() not in ("0", "false", "no", "off")
+DOCKER_ROOT = os.environ.get("AGENT_DOCKER_ROOT") or "/var/lib/docker"
+LOGS_URL = os.environ.get("AGENT_LOGS_URL") or (URL[: -len("/ingest")] + "/logs" if URL.endswith("/ingest") else "")
 # اندازه‌گیری تأخیر: زمان اتصال TCP به این مقصد (پیش‌فرض: خود داشبورد)
 PING_TARGET = os.environ.get("AGENT_PING_TARGET", "")
 
@@ -258,6 +263,22 @@ def start_peers_worker(peers_sync) -> None:
     threading.Thread(target=run, name="peers-sync", daemon=True).start()
 
 
+def make_service_logs():
+    if not (LOGS and SERVICES and LOGS_URL):
+        return None
+    # مسیر داکر روی میزبان؛ داخل کانتینر از /hostfs دیده می‌شود
+    root = os.path.join("/hostfs", DOCKER_ROOT.lstrip("/")) if os.path.isdir("/hostfs") else DOCKER_ROOT
+    log.info("reading container logs of %s from %s", ",".join(SERVICES), root)
+    return logs.ServiceLogs(SERVICES, root, PROC)
+
+
+def report_logs(session, service_logs) -> None:
+    items = service_logs.collect()
+    if items:
+        r = session.post(LOGS_URL, json={"services": items}, timeout=15)
+        r.raise_for_status()
+
+
 def make_peers_sync(session):
     if not HBBS_DIR:
         return None
@@ -286,6 +307,7 @@ def main():
     if peers_sync:
         start_peers_worker(peers_sync)
     sniffer = make_sniffer()
+    service_logs = make_service_logs()
     backoff = INTERVAL
     time.sleep(1)
     while True:
@@ -306,6 +328,11 @@ def main():
                 report_online(session, sniffer)
             except Exception as exc:  # پنل در دسترس نیست؛ دور بعد
                 log.warning("online report failed: %s", exc)
+        if service_logs:
+            try:
+                report_logs(session, service_logs)
+            except Exception as exc:  # پنل قدیمی (بدون /logs) یا در دسترس نیست؛ دور بعد
+                log.warning("logs report failed: %s", exc)
         time.sleep(max(1.0, backoff - (time.monotonic() - started)))
 
 
